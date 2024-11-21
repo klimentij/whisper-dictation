@@ -5,27 +5,60 @@ import pyaudio
 import numpy as np
 import rumps
 from pynput import keyboard
-from whisper import load_model
+import subprocess
 import platform
+import os
 
 class SpeechTranscriber:
-    def __init__(self, model):
-        self.model = model
+    def __init__(self, model_name):
+        self.model_name = model_name
+        self.model_path = f"../whisper.cpp/models/ggml-{model_name}.bin"
         self.pykeyboard = keyboard.Controller()
+        
+        # Create audio directory if it doesn't exist
+        os.makedirs('audio', exist_ok=True)
+        
+        # Check if model exists
+        if not os.path.exists(self.model_path):
+            raise FileNotFoundError(
+                f"Model file not found: {self.model_path}\n\n"
+                f"Download model with: cd ../whisper.cpp && bash ./models/download-ggml-model.sh {model_name}\n"
+            )
 
     def transcribe(self, audio_data, language=None):
-        result = self.model.transcribe(audio_data, language=language)
-        is_first = True
-        for element in result["text"]:
-            if is_first and element == " ":
-                is_first = False
-                continue
-
-            try:
-                self.pykeyboard.type(element)
-                time.sleep(0.0025)
-            except:
-                pass
+        # Save audio data to audio directory with timestamp
+        import datetime
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        audio_path = os.path.join('audio', f'recording_{timestamp}.wav')
+        
+        # Save the audio file
+        import soundfile as sf
+        sf.write(audio_path, audio_data, 16000)
+            
+        # Build command
+        cmd = ['../whisper.cpp/main', '-m', self.model_path, '-f', audio_path, '-nt']
+        if language:
+            cmd.extend(['-l', language])
+        
+        # Run whisper.cpp and type results
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            text = result.stdout.strip()
+            
+            # Type out the transcribed text
+            is_first = True
+            for element in text:
+                if is_first and element == " ":
+                    is_first = False
+                    continue
+                try:
+                    self.pykeyboard.type(element)
+                    time.sleep(0.0025)
+                except:
+                    pass
+                    
+        except Exception as e:
+            print(f"Error during transcription: {e}")
 
 class Recorder:
     def __init__(self, transcriber):
@@ -191,23 +224,18 @@ class StatusBarApp(rumps.App):
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description='Dictation app using the OpenAI whisper ASR model. By default the keyboard shortcut cmd+option '
+        description='Dictation app using whisper.cpp ASR model. By default the keyboard shortcut cmd+option '
         'starts and stops dictation')
     parser.add_argument('-m', '--model_name', type=str,
-                        choices=['tiny', 'tiny.en', 'base', 'base.en', 'small', 'small.en', 'medium', 'medium.en', 'large'],
-                        default='base',
-                        help='Specify the whisper ASR model to use. Options: tiny, base, small, medium, or large. '
-                        'To see the  most up to date list of models along with model size, memory footprint, and estimated '
-                        'transcription speed check out this [link](https://github.com/openai/whisper#available-models-and-languages). '
-                        'Note that the models ending in .en are trained only on English speech and will perform better on English '
-                        'language. Note that the small, medium, and large models may be slow to transcribe and are only recommended '
-                        'if you find the base model to be insufficient. Default: base.')
+                        choices=['tiny', 'tiny.en', 'base', 'base.en', 'small', 'small.en', 'medium', 'medium.en', 'large-v1', 'large-v2', 'large-v3', 'large-v3-turbo'],
+                        default='large-v3-turbo',
+                        help='Specify the whisper.cpp model to use. Check https://github.com/ggerganov/whisper.cpp for available models.')
     parser.add_argument('-k', '--key_combination', type=str, default='cmd_l+alt' if platform.system() == 'Darwin' else 'ctrl+alt',
                         help='Specify the key combination to toggle the app. Example: cmd_l+alt for macOS '
                         'ctrl+alt for other platforms. Default: cmd_r+alt (macOS) or ctrl+alt (others).')
     parser.add_argument('--k_double_cmd', action='store_true',
                             help='If set, use double Right Command key press on macOS to toggle the app (double click to begin recording, single click to stop recording). '
-                                 'Ignores the --key_combination argument.')
+                                 'Ignores the --key_combination argument.', default=True)
     parser.add_argument('-l', '--language', type=str, default=None,
                         help='Specify the two-letter language code (e.g., "en" for English) to improve recognition accuracy. '
                         'This can be especially helpful for smaller model sizes.  To see the full list of supported languages, '
@@ -230,12 +258,8 @@ def parse_args():
 if __name__ == "__main__":
     args = parse_args()
 
-    print("Loading model...")
-    model_name = args.model_name
-    model = load_model(model_name)
-    print(f"{model_name} model loaded")
-    
-    transcriber = SpeechTranscriber(model)
+    print("Initializing transcriber...")
+    transcriber = SpeechTranscriber(args.model_name)
     recorder = Recorder(transcriber)
     
     app = StatusBarApp(recorder, args.language, args.max_time)
