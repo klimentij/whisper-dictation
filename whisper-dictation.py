@@ -5,60 +5,51 @@ import pyaudio
 import numpy as np
 import rumps
 from pynput import keyboard
-import subprocess
 import platform
 import os
+from pywhispercpp.model import Model
 
 class SpeechTranscriber:
     def __init__(self, model_name):
         self.model_name = model_name
-        self.model_path = f"../whisper.cpp/models/ggml-{model_name}.bin"
         self.pykeyboard = keyboard.Controller()
         
         # Create audio directory if it doesn't exist
         os.makedirs('audio', exist_ok=True)
         
-        # Check if model exists
-        if not os.path.exists(self.model_path):
-            raise FileNotFoundError(
-                f"Model file not found: {self.model_path}\n\n"
-                f"Download model with: cd ../whisper.cpp && bash ./models/download-ggml-model.sh {model_name}\n"
-            )
+        print(f"Loading model {model_name}...")
+        self.model = Model(model_name, 
+                         print_realtime=True, 
+                         print_progress=True,
+                         print_timestamps=False)
 
     def transcribe(self, audio_data, language=None):
-        # Save audio data to audio directory with timestamp
-        import datetime
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        audio_path = os.path.join('audio', f'recording_{timestamp}.wav')
-        
-        # Save the audio file
-        import soundfile as sf
-        sf.write(audio_path, audio_data, 16000)
-            
-        # Build command
-        cmd = ['../whisper.cpp/main', '-m', self.model_path, '-f', audio_path, '-nt']
-        if language:
-            cmd.extend(['-l', language])
-        
-        # Run whisper.cpp and type results
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            text = result.stdout.strip()
+            def type_callback(segments):
+                # segments is a list of Segment objects
+                for segment in segments:
+                    # Each segment is a Segment object with text property
+                    text = segment.text
+                    if text.startswith(' '):
+                        text = text[1:]
+                    for char in text:
+                        try:
+                            self.pykeyboard.type(char)
+                            time.sleep(0.0025)
+                        except:
+                            pass
+
+            if language:
+                self.model.params.language = language
             
-            # Type out the transcribed text
-            is_first = True
-            for element in text:
-                if is_first and element == " ":
-                    is_first = False
-                    continue
-                try:
-                    self.pykeyboard.type(element)
-                    time.sleep(0.0025)
-                except:
-                    pass
+            self.model.transcribe(audio_data, 
+                                language=language,
+                                new_segment_callback=type_callback)
                     
         except Exception as e:
             print(f"Error during transcription: {e}")
+            import traceback
+            traceback.print_exc()
 
 class Recorder:
     def __init__(self, transcriber):
@@ -227,7 +218,12 @@ def parse_args():
         description='Dictation app using whisper.cpp ASR model. By default the keyboard shortcut cmd+option '
         'starts and stops dictation')
     parser.add_argument('-m', '--model_name', type=str,
-                        choices=['tiny', 'tiny.en', 'base', 'base.en', 'small', 'small.en', 'medium', 'medium.en', 'large-v1', 'large-v2', 'large-v3', 'large-v3-turbo'],
+                        choices=['tiny', 'tiny-q5_1', 'tiny.en', 'tiny.en-q5_1', 'tiny.en-q8_0',
+                                'base', 'base-q5_1', 'base.en', 'base.en-q5_1',
+                                'small', 'small-q5_1', 'small.en', 'small.en-q5_1',
+                                'medium', 'medium-q5_0', 'medium.en', 'medium.en-q5_0',
+                                'large-v1', 'large-v2', 'large-v2-q5_0',
+                                'large-v3', 'large-v3-q5_0', 'large-v3-turbo'],
                         default='large-v3-turbo',
                         help='Specify the whisper.cpp model to use. Check https://github.com/ggerganov/whisper.cpp for available models.')
     parser.add_argument('-k', '--key_combination', type=str, default='cmd_l+alt' if platform.system() == 'Darwin' else 'ctrl+alt',
