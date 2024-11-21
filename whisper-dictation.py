@@ -22,6 +22,9 @@ class SubprocessTranscriber:
         self.server_process = None
         self.server_url = "http://127.0.0.1:8080"
         
+        # Create audio directory if it doesn't exist
+        os.makedirs("audio", exist_ok=True)
+        
         # Start the server
         self.start_server()
         
@@ -31,7 +34,11 @@ class SubprocessTranscriber:
             "-m", self.model_path,
             "--host", "127.0.0.1",
             "--port", "8080",
-            "-t", "4"  # threads
+            "-t", "4",  # threads
+            "-l", "auto",  # auto language detection
+            "-pr",  # print realtime
+            "-pc",  # print colors
+            "-nt"   # no timestamps
         ]
         
         self.server_process = subprocess.Popen(cmd)
@@ -39,16 +46,18 @@ class SubprocessTranscriber:
         
     def transcribe(self, audio_data, language=None):
         try:
-            # Save temporary WAV file
-            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_wav:
-                with wave.open(temp_wav.name, 'wb') as wf:
-                    wf.setnchannels(1)
-                    wf.setsampwidth(2)
-                    wf.setframerate(16000)
-                    wf.writeframes((audio_data * 32768).astype(np.int16).tobytes())
+            # Save WAV file to audio directory with timestamp
+            timestamp = time.strftime("%Y%m%d-%H%M%S")
+            wav_path = os.path.join("audio", f"recording_{timestamp}.wav")
+            
+            with wave.open(wav_path, 'wb') as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(16000)
+                wf.writeframes((audio_data * 32768).astype(np.int16).tobytes())
             
             # Send HTTP request to the server
-            files = {'file': open(temp_wav.name, 'rb')}
+            files = {'file': open(wav_path, 'rb')}
             data = {'response_format': 'json'}
             if language:
                 data['language'] = language
@@ -249,8 +258,8 @@ def parse_args():
                                 'small', 'small-q5_1', 'small.en', 'small.en-q5_1',
                                 'medium', 'medium-q5_0', 'medium.en', 'medium.en-q5_0',
                                 'large-v1', 'large-v2', 'large-v2-q5_0',
-                                'large-v3', 'large-v3-q5_0', 'large-v3-turbo'],
-                        default='large-v3-turbo',
+                                'large-v3', 'large-v3-q5_0', 'large-v3-turbo', 'large-v3-turbo-q5_0'],
+                        default='large-v3-turbo-q5_0',
                         help='Specify the whisper.cpp model to use. Check https://github.com/ggerganov/whisper.cpp for available models.')
     parser.add_argument('-k', '--key_combination', type=str, default='cmd_l+alt' if platform.system() == 'Darwin' else 'ctrl+alt',
                         help='Specify the key combination to toggle the app. Example: cmd_l+alt for macOS '
