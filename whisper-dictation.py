@@ -7,7 +7,14 @@ import rumps
 from pynput import keyboard
 import platform
 import os
-from pywhispercpp.model import Model
+import ctypes
+from ctypes import c_int, c_float, c_char_p, POINTER, Structure, c_void_p
+import tempfile
+import wave
+import subprocess
+
+class WhisperContext(Structure):
+    _fields_ = []  # Opaque structure
 
 class SpeechTranscriber:
     def __init__(self, model_name):
@@ -17,39 +24,144 @@ class SpeechTranscriber:
         # Create audio directory if it doesn't exist
         os.makedirs('audio', exist_ok=True)
         
+        # Load the whisper shared library
+        self.lib = ctypes.CDLL("../whisper.cpp/libwhisper.so")
+        
+        # Configure function signatures
+        self.lib.whisper_init_from_file.restype = POINTER(WhisperContext)
+        self.lib.whisper_init_from_file.argtypes = [c_char_p]
+        
+        self.lib.whisper_full_default.restype = c_int
+        # Add other necessary function signatures...
+        
         print(f"Loading model {model_name}...")
-        self.model = Model(model_name, 
-                         print_realtime=True, 
-                         print_progress=True,
-                         print_timestamps=False)
+        model_path = f"../whisper.cpp/models/ggml-{model_name}.bin"
+        self.ctx = self.lib.whisper_init_from_file(model_path.encode('utf-8'))
+        if not self.ctx:
+            raise RuntimeError("Failed to load model")
 
     def transcribe(self, audio_data, language=None):
         try:
-            def type_callback(segments):
-                # segments is a list of Segment objects
-                for segment in segments:
-                    # Each segment is a Segment object with text property
-                    text = segment.text
-                    if text.startswith(' '):
-                        text = text[1:]
-                    for char in text:
-                        try:
-                            self.pykeyboard.type(char)
-                            time.sleep(0.0025)
-                        except:
-                            pass
-
-            if language:
-                self.model.params.language = language
+            # Convert audio data to proper format for whisper.cpp
+            audio_data = (c_float * len(audio_data))(*audio_data)
             
-            self.model.transcribe(audio_data, 
-                                language=language,
-                                new_segment_callback=type_callback)
+            # Set up parameters
+            params = self.lib.whisper_full_default_params()
+            if language:
+                params.language = language.encode('utf-8')
+            
+            # Run inference
+            result = self.lib.whisper_full(self.ctx, params, audio_data, len(audio_data))
+            if result != 0:
+                raise RuntimeError("Failed to run inference")
+            
+            # Get number of segments
+            n_segments = self.lib.whisper_full_n_segments(self.ctx)
+            
+            # Process each segment
+            for i in range(n_segments):
+                text = self.lib.whisper_full_get_segment_text(self.ctx, i)
+                text = text.decode('utf-8')
+                if text.startswith(' '):
+                    text = text[1:]
+                for char in text:
+                    try:
+                        self.pykeyboard.type(char)
+                        time.sleep(0.0025)
+                    except:
+                        pass
                     
         except Exception as e:
             print(f"Error during transcription: {e}")
             import traceback
             traceback.print_exc()
+
+    def __del__(self):
+        if hasattr(self, 'ctx') and self.ctx:
+            self.lib.whisper_free(self.ctx)
+
+class SubprocessTranscriber:
+    def __init__(self, model_name):
+        self.model_name = model_name
+        self.pykeyboard = keyboard.Controller()
+        self.whisper_path = "../whisper.cpp/main"
+        self.model_path = f"../whisper.cpp/models/ggml-{model_name}.bin"
+        
+        # Verify whisper executable exists
+        if not os.path.exists(self.whisper_path):
+            raise RuntimeError(f"Whisper executable not found at {self.whisper_path}")
+        
+        # Verify model exists
+        if not os.path.exists(self.model_path):
+            raise RuntimeError(f"Model not found at {self.model_path}")
+        
+        print(f"Using model: {self.model_path}")
+
+    def transcribe(self, audio_data, language=None):
+        try:
+            # Create temporary WAV file
+            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_wav:
+                with wave.open(temp_wav.name, 'wb') as wf:
+                    wf.setnchannels(1)
+                    wf.setsampwidth(2)  # 16-bit
+                    wf.setframerate(16000)
+                    wf.writeframes((audio_data * 32768).astype(np.int16).tobytes())
+            
+            # Build command with proper arguments
+            cmd = [
+                self.whisper_path,
+                "-m", self.model_path,
+                "-f", temp_wav.name,
+                "-pp",           # print progress
+                "-otxt",         # output text format
+                "--output-file", temp_wav.name,  # base name for output
+                "-t", "4",       # number of threads
+                "-pc"           # print colors
+            ]
+            
+            if language:
+                cmd.extend(["-l", language])
+            else:
+                cmd.extend(["-l", "auto"])  # auto-detect language if none specified
+            
+            # Run whisper.cpp
+            try:
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    check=True
+                )
+                
+                # Read the output text file
+                output_txt = temp_wav.name + ".txt"
+                if os.path.exists(output_txt):
+                    with open(output_txt, 'r', encoding='utf-8') as f:
+                        text = f.read().strip()
+                else:
+                    text = result.stdout.strip()
+                
+                # Type out the text
+                for char in text:
+                    try:
+                        self.pykeyboard.type(char)
+                        time.sleep(0.0025)
+                    except:
+                        pass
+                        
+            finally:
+                # Clean up temp files
+                os.unlink(temp_wav.name)
+                if os.path.exists(temp_wav.name + ".txt"):
+                    os.unlink(temp_wav.name + ".txt")
+                    
+        except Exception as e:
+            print(f"Error during transcription: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def __del__(self):
+        pass  # No cleanup needed
 
 class Recorder:
     def __init__(self, transcriber):
@@ -224,7 +336,7 @@ def parse_args():
                                 'medium', 'medium-q5_0', 'medium.en', 'medium.en-q5_0',
                                 'large-v1', 'large-v2', 'large-v2-q5_0',
                                 'large-v3', 'large-v3-q5_0', 'large-v3-turbo'],
-                        default='large-v3-turbo',
+                        default='tiny',
                         help='Specify the whisper.cpp model to use. Check https://github.com/ggerganov/whisper.cpp for available models.')
     parser.add_argument('-k', '--key_combination', type=str, default='cmd_l+alt' if platform.system() == 'Darwin' else 'ctrl+alt',
                         help='Specify the key combination to toggle the app. Example: cmd_l+alt for macOS '
@@ -239,6 +351,8 @@ def parse_args():
     parser.add_argument('-t', '--max_time', type=float, default=30,
                         help='Specify the maximum recording time in seconds. The app will automatically stop recording after this duration. '
                         'Default: 30 seconds.')
+    parser.add_argument('--use-subprocess', action='store_true',
+                       help='Use subprocess to call whisper.cpp executable instead of library bindings')
 
     args = parser.parse_args()
 
@@ -255,7 +369,10 @@ if __name__ == "__main__":
     args = parse_args()
 
     print("Initializing transcriber...")
-    transcriber = SpeechTranscriber(args.model_name)
+    if args.use_subprocess:
+        transcriber = SubprocessTranscriber(args.model_name)
+    else:
+        transcriber = SpeechTranscriber(args.model_name)
     recorder = Recorder(transcriber)
     
     app = StatusBarApp(recorder, args.language, args.max_time)
