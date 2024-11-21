@@ -10,6 +10,7 @@ import os
 import tempfile
 import wave
 import subprocess
+import requests
 
 class SubprocessTranscriber:
     def __init__(self, model_name):
@@ -17,72 +18,47 @@ class SubprocessTranscriber:
         self.pykeyboard = keyboard.Controller()
         self.whisper_path = "../whisper.cpp/main"
         self.model_path = f"../whisper.cpp/models/ggml-{model_name}.bin"
+        self.server_path = "../whisper.cpp/server"
+        self.server_process = None
+        self.server_url = "http://127.0.0.1:8080"
         
-        # Create audio directory if it doesn't exist
-        os.makedirs('audio', exist_ok=True)
+        # Start the server
+        self.start_server()
         
-        # Verify whisper executable exists
-        if not os.path.exists(self.whisper_path):
-            raise RuntimeError(f"Whisper executable not found at {self.whisper_path}")
+    def start_server(self):
+        cmd = [
+            self.server_path,
+            "-m", self.model_path,
+            "--host", "127.0.0.1",
+            "--port", "8080",
+            "-t", "4"  # threads
+        ]
         
-        # Verify model exists
-        if not os.path.exists(self.model_path):
-            raise RuntimeError(f"Model not found at {self.model_path}")
+        self.server_process = subprocess.Popen(cmd)
+        time.sleep(2)  # Give the server time to start
         
-        print(f"Using model: {self.model_path}")
-
     def transcribe(self, audio_data, language=None):
         try:
-            # Create timestamped filename
-            timestamp = time.strftime("%Y%m%d-%H%M%S")
-            wav_path = os.path.join('audio', f'recording_{timestamp}.wav')
-            
-            # Save WAV file
-            with wave.open(wav_path, 'wb') as wf:
-                wf.setnchannels(1)
-                wf.setsampwidth(2)  # 16-bit
-                wf.setframerate(16000)
-                wf.writeframes((audio_data * 32768).astype(np.int16).tobytes())
-            
-            # Create temporary copy for whisper processing
+            # Save temporary WAV file
             with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_wav:
-                # Copy the saved WAV file to temp location
-                with open(wav_path, 'rb') as f:
-                    temp_wav.write(f.read())
+                with wave.open(temp_wav.name, 'wb') as wf:
+                    wf.setnchannels(1)
+                    wf.setsampwidth(2)
+                    wf.setframerate(16000)
+                    wf.writeframes((audio_data * 32768).astype(np.int16).tobytes())
             
-            # Build command with proper arguments
-            cmd = [
-                self.whisper_path,
-                "-m", self.model_path,
-                "-f", temp_wav.name,
-                "-pp",           # print progress
-                "-otxt",         # output text format
-                "--output-file", temp_wav.name,  # base name for output
-                "-t", "4",       # number of threads
-                "-pc"           # print colors
-            ]
-            
+            # Send HTTP request to the server
+            files = {'file': open(temp_wav.name, 'rb')}
+            data = {'response_format': 'json'}
             if language:
-                cmd.extend(["-l", language])
-            else:
-                cmd.extend(["-l", "auto"])  # auto-detect language if none specified
-            
-            # Run whisper.cpp
-            try:
-                result = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    check=True
-                )
+                data['language'] = language
                 
-                # Read the output text file
-                output_txt = temp_wav.name + ".txt"
-                if os.path.exists(output_txt):
-                    with open(output_txt, 'r', encoding='utf-8') as f:
-                        text = f.read().strip()
-                else:
-                    text = result.stdout.strip()
+            response = requests.post(f"{self.server_url}/inference", 
+                                   files=files, 
+                                   data=data)
+            
+            if response.status_code == 200:
+                text = response.json()['text'].strip()
                 
                 # Type out the text
                 for char in text:
@@ -92,19 +68,14 @@ class SubprocessTranscriber:
                     except:
                         pass
                         
-            finally:
-                # Only delete temp files, keep the saved WAV
-                os.unlink(temp_wav.name)
-                if os.path.exists(temp_wav.name + ".txt"):
-                    os.unlink(temp_wav.name + ".txt")
-                    
         except Exception as e:
             print(f"Error during transcription: {e}")
             import traceback
             traceback.print_exc()
-
+            
     def __del__(self):
-        pass  # No cleanup needed
+        if self.server_process:
+            self.server_process.terminate()
 
 class Recorder:
     def __init__(self, transcriber):
